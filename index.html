@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Rắn săn mồi</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #1a1a2e);
+    --text: var(--tg-theme-text-color, #eeeeee);
+    --hint: var(--tg-theme-hint-color, #999999);
+    --card: var(--tg-theme-secondary-bg-color, #16213e);
+    --accent: var(--tg-theme-button-color, #e94560);
+    --accent-text: var(--tg-theme-button-text-color, #ffffff);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; overflow: hidden; overscroll-behavior: none; }
+  body {
+    font-family: system-ui, sans-serif;
+    background: var(--bg); color: var(--text);
+    display: flex; flex-direction: column; align-items: center;
+    padding: 12px; gap: 10px; user-select: none;
+  }
+  .stats { display: flex; gap: 8px; width: 100%; max-width: 480px; }
+  .stat { flex: 1; background: var(--card); border-radius: 10px; padding: 6px 10px; }
+  .stat small { color: var(--hint); font-size: 12px; }
+  .stat div { font-size: 20px; font-weight: 500; }
+  .wrap { position: relative; width: 100%; max-width: 480px; }
+  canvas { width: 100%; height: auto; aspect-ratio: 1; display: block; border-radius: 12px; background: var(--card); touch-action: none; }
+  #overlay {
+    position: absolute; inset: 0; border-radius: 12px; background: rgba(0,0,0,.5); color: #fff;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+  }
+  #msg { font-size: 22px; text-align: center; padding: 0 12px; }
+  button { background: var(--accent); color: var(--accent-text); border: none; border-radius: 10px; padding: 10px 22px; font-size: 16px; }
+  .pad { display: grid; grid-template-columns: repeat(3, 60px); gap: 6px; }
+  .pad button { background: var(--card); color: var(--text); padding: 12px 0; font-size: 18px; }
+  .help { color: var(--hint); font-size: 12px; text-align: center; }
+</style>
+</head>
+<body>
+  <div class="stats">
+    <div class="stat"><small>Điểm</small><div id="score">0</div></div>
+    <div class="stat"><small>Kỷ lục</small><div id="best">0</div></div>
+    <div class="stat"><small>Tốc độ</small><div id="level">1</div></div>
+  </div>
+
+  <div class="wrap">
+    <canvas id="game" width="500" height="500"></canvas>
+    <div id="overlay">
+      <div id="msg">Rắn săn mồi</div>
+      <button id="startBtn">Bắt đầu</button>
+    </div>
+  </div>
+
+  <div class="pad">
+    <span></span><button data-dir="0,-1">▲</button><span></span>
+    <button data-dir="-1,0">◀</button><button id="pauseBtn">❚❚</button><button data-dir="1,0">▶</button>
+    <span></span><button data-dir="0,1">▼</button><span></span>
+  </div>
+  <p class="help">Vuốt trên bàn chơi hoặc dùng nút · Mồi đỏ +1 · Mồi vàng +5</p>
+
+<script>
+// ---- Telegram Mini App ----
+const tg = window.Telegram && window.Telegram.WebApp;
+const inTelegram = !!(tg && tg.initData);
+if (tg) {
+  tg.ready();
+  tg.expand();                                   // mở toàn chiều cao
+  try { tg.disableVerticalSwipes(); } catch (e) {} // vuốt dọc không đóng app
+}
+function haptic(type) {
+  try { if (inTelegram) tg.HapticFeedback.notificationOccurred(type); } catch (e) {}
+}
+function tap() {
+  try { if (inTelegram) tg.HapticFeedback.impactOccurred('light'); } catch (e) {}
+}
+
+// Lưu kỷ lục: dùng CloudStorage của Telegram (theo tài khoản), nếu không có thì localStorage
+function loadBest(cb) {
+  if (inTelegram && tg.CloudStorage) {
+    tg.CloudStorage.getItem('snakeBest', (err, v) => cb(err ? 0 : Number(v || 0)));
+  } else {
+    let v = 0; try { v = Number(localStorage.getItem('snakeBest') || 0); } catch (e) {}
+    cb(v);
+  }
+}
+function saveBest(v) {
+  if (inTelegram && tg.CloudStorage) tg.CloudStorage.setItem('snakeBest', String(v));
+  else { try { localStorage.setItem('snakeBest', v); } catch (e) {} }
+}
+
+// ---- Game ----
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const GRID = 25;
+const CELL = canvas.width / GRID;
+const COLORS = { head: '#4ecca3', body: '#2e9c7a', food: '#e94560', gold: '#f5b041', grid: 'rgba(128,128,128,0.08)' };
+
+let snake, dir, nextDir, food, gold, score, speed, timer, best = 0;
+let running = false, paused = false;
+const $ = id => document.getElementById(id);
+
+function randomCell() {
+  let p;
+  do {
+    p = { x: Math.floor(Math.random() * GRID), y: Math.floor(Math.random() * GRID) };
+  } while (snake.some(s => s.x === p.x && s.y === p.y) || (food && food.x === p.x && food.y === p.y));
+  return p;
+}
+
+function reset() {
+  const c = Math.floor(GRID / 2);
+  snake = [{ x: c, y: c }, { x: c - 1, y: c }, { x: c - 2, y: c }];
+  dir = { x: 1, y: 0 }; nextDir = dir;
+  food = null; food = randomCell(); gold = null;
+  score = 0; speed = 150;
+  updateHUD();
+}
+
+function updateHUD() {
+  $('score').textContent = score;
+  $('best').textContent = best;
+  $('level').textContent = Math.round((160 - speed) / 10) + 1;
+}
+
+function step() {
+  if (!running || paused) return;
+  dir = nextDir;
+  const head = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
+  if (head.x < 0 || head.y < 0 || head.x >= GRID || head.y >= GRID ||
+      snake.some(s => s.x === head.x && s.y === head.y)) return gameOver();
+
+  snake.unshift(head);
+  let ate = false;
+  if (head.x === food.x && head.y === food.y) {
+    score += 1; ate = true; tap();
+    food = randomCell();
+    if (!gold && Math.random() < 0.25) gold = { ...randomCell(), ttl: 50 };
+    if (speed > 60) speed -= 4;
+  } else if (gold && head.x === gold.x && head.y === gold.y) {
+    score += 5; ate = true; gold = null; haptic('success');
+  }
+  if (!ate) snake.pop();
+  if (gold && --gold.ttl <= 0) gold = null;
+
+  if (score > best) { best = score; saveBest(best); }
+  updateHUD(); draw();
+  timer = setTimeout(step, speed);
+}
+
+function drawCell(x, y, color, r) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.roundRect(x * CELL + 1, y * CELL + 1, CELL - 2, CELL - 2, Math.min(r, (CELL - 2) / 2));
+  ctx.fill();
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = COLORS.grid;
+  for (let i = 0; i < GRID; i++)
+    for (let j = 0; j < GRID; j++)
+      if ((i + j) % 2) ctx.fillRect(i * CELL, j * CELL, CELL, CELL);
+
+  drawCell(food.x, food.y, COLORS.food, CELL / 2);
+  if (gold && (gold.ttl > 10 || gold.ttl % 2)) drawCell(gold.x, gold.y, COLORS.gold, 4);
+  snake.forEach((s, i) => drawCell(s.x, s.y, i ? COLORS.body : COLORS.head, i ? 4 : 6));
+
+  const h = snake[0], lo = CELL * 0.3, hi = CELL * 0.7;
+  const ex = dir.y ? [lo, hi] : [dir.x > 0 ? hi : lo, dir.x > 0 ? hi : lo];
+  const ey = dir.x ? [lo, hi] : [dir.y > 0 ? hi : lo, dir.y > 0 ? hi : lo];
+  ctx.fillStyle = '#1a1a2e';
+  for (let k = 0; k < 2; k++) {
+    ctx.beginPath();
+    ctx.arc(h.x * CELL + ex[k], h.y * CELL + ey[k], Math.max(1, CELL / 10), 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function gameOver() {
+  running = false;
+  haptic('error');
+  $('msg').textContent = 'Thua rồi! Điểm: ' + score;
+  $('startBtn').textContent = 'Chơi lại';
+  $('overlay').style.display = 'flex';
+  if (inTelegram) { tg.MainButton.setText('Chơi lại'); tg.MainButton.show(); }
+}
+
+function start() {
+  clearTimeout(timer);
+  reset();
+  running = true; paused = false;
+  $('overlay').style.display = 'none';
+  if (inTelegram) tg.MainButton.hide();
+  draw();
+  timer = setTimeout(step, speed);
+}
+
+function turn(x, y) {
+  if (!running) return;
+  if (x === -dir.x && y === -dir.y) return;
+  nextDir = { x, y };
+}
+
+function togglePause() {
+  if (!running) return;
+  paused = !paused;
+  if (!paused) timer = setTimeout(step, speed);
+}
+
+$('startBtn').onclick = start;
+$('pauseBtn').onclick = togglePause;
+if (inTelegram) tg.MainButton.onClick(start);
+document.querySelectorAll('[data-dir]').forEach(btn => {
+  btn.onclick = () => turn(...btn.dataset.dir.split(',').map(Number));
+});
+
+const KEYS = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0],
+               w: [0, -1], s: [0, 1], a: [-1, 0], d: [1, 0] };
+document.addEventListener('keydown', e => {
+  if (KEYS[e.key]) { e.preventDefault(); turn(...KEYS[e.key]); }
+  else if (e.key === ' ') { e.preventDefault(); running ? togglePause() : start(); }
+});
+
+// Vuốt: bắt trên cả trang để dễ điều khiển trên điện thoại
+let tx, ty;
+document.addEventListener('touchstart', e => { tx = e.touches[0].clientX; ty = e.touches[0].clientY; }, { passive: true });
+document.addEventListener('touchmove', e => { if (running) e.preventDefault(); }, { passive: false });
+document.addEventListener('touchend', e => {
+  const dx = e.changedTouches[0].clientX - tx, dy = e.changedTouches[0].clientY - ty;
+  if (Math.max(Math.abs(dx), Math.abs(dy)) < 20) return;
+  Math.abs(dx) > Math.abs(dy) ? turn(Math.sign(dx), 0) : turn(0, Math.sign(dy));
+});
+
+// Tạm dừng khi người chơi rời app
+document.addEventListener('visibilitychange', () => { if (document.hidden && running && !paused) togglePause(); });
+
+reset();
+draw();
+loadBest(v => { best = v; updateHUD(); });
+</script>
+</body>
+</html>
